@@ -4,13 +4,17 @@ import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sendAligo } from './aligo.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.env.NODE_ENV === 'production';
 const adminUser = process.env.ADMIN_USERNAME || 'admin';
 const adminPassword = process.env.ADMIN_PASSWORD || 'banhxeo-local-2026';
 const smsMode = process.env.SMS_MODE || 'mock';
-if (production && (adminPassword.length < 16 || ['banhxeo-local-2026','change-this-before-deploying'].includes(adminPassword) || smsMode !== 'webhook' || !process.env.SMS_WEBHOOK_URL?.startsWith('https://'))) throw new Error('운영 환경의 관리자 비밀번호와 HTTPS SMS 어댑터를 설정하세요.');
+if (production && (adminPassword.length < 16 || ['banhxeo-local-2026','change-this-before-deploying'].includes(adminPassword))) throw new Error('운영 환경의 관리자 비밀번호를 설정하세요.');
+if (production && smsMode === 'aligo' && (!process.env.ALIGO_USER_ID || !process.env.ALIGO_API_KEY || !/^\d{8,16}$/.test(process.env.ALIGO_SENDER || '') || process.env.ALIGO_TEST_MODE === 'Y')) throw new Error('운영 환경의 알리고 계정, API 키, 등록된 발신번호를 설정하세요.');
+if (production && smsMode === 'webhook' && !process.env.SMS_WEBHOOK_URL?.startsWith('https://')) throw new Error('운영 환경의 HTTPS SMS 어댑터를 설정하세요.');
+if (production && !['aligo','webhook'].includes(smsMode)) throw new Error('운영 환경의 실제 문자 발송 방식을 설정하세요.');
 const numeric = (key, fallback) => { const v = Number(process.env[key] || fallback); if (!Number.isSafeInteger(v) || v < 1) throw new Error(`Invalid ${key}`); return v; };
 const price = numeric('RESERVATION_UNIT_PRICE', 5500), limit = numeric('RESERVATION_LIMIT', 100), maxQuantity = numeric('MAX_ORDER_QUANTITY', 5), timeout = numeric('PAYMENT_TIMEOUT_MINUTES', 60);
 const dates = ['2026-10-06', '2026-10-07'], slots = ['17:30-19:00', '19:00-20:30', '20:30-22:00'];
@@ -24,8 +28,10 @@ CREATE TABLE IF NOT EXISTS reservations (id INTEGER PRIMARY KEY, reservation_cod
 CREATE TABLE IF NOT EXISTS sms_jobs (id INTEGER PRIMARY KEY, reservation_id INTEGER NOT NULL REFERENCES reservations(id), phone TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL, retry_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at INTEGER NOT NULL, next_attempt INTEGER NOT NULL, sent_at INTEGER);
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS sms_pending ON sms_jobs(status,next_attempt);`);
+if (!db.prepare('PRAGMA table_info(sms_jobs)').all().some(column => column.name === 'provider_message_id')) db.exec('ALTER TABLE sms_jobs ADD COLUMN provider_message_id TEXT');
 for (const date of dates) db.prepare('INSERT INTO inventory(event_date,reservation_limit) VALUES (?,?) ON CONFLICT(event_date) DO UPDATE SET reservation_limit=excluded.reservation_limit').run(date, limit);
-db.prepare("UPDATE sms_jobs SET status='PENDING' WHERE status='SENDING'").run();
+if (smsMode === 'aligo') db.prepare("UPDATE sms_jobs SET status='FAILED',last_error='서버 재시작 전 문자 접수 여부를 알 수 없습니다. 알리고 발송 내역을 확인하세요.' WHERE status='SENDING'").run();
+else db.prepare("UPDATE sms_jobs SET status='PENDING' WHERE status='SENDING'").run();
 const transaction = fn => { db.exec('BEGIN IMMEDIATE'); try { const result = fn(); db.exec('COMMIT'); return result; } catch (e) { db.exec('ROLLBACK'); throw e; } };
 const fail = (status, message, fields) => { throw Object.assign(new Error(message), { status, fields }); };
 function expire() {
@@ -40,8 +46,8 @@ function expire() {
 }
 function serialize(r, admin = false) {
   const job = db.prepare('SELECT * FROM sms_jobs WHERE reservation_id=? ORDER BY id DESC LIMIT 1').get(r.id);
-  const result = { reservationCode: r.reservation_code, accessToken: r.access_token, customerName: r.customer_name, depositorName: r.depositor_name, pickupDate: r.pickup_date, pickupSlot: r.pickup_slot, quantity: r.quantity, unitPrice: r.unit_price, expectedAmount: r.expected_amount, status: r.status, pickupCode: r.pickup_code, createdAt: r.created_at, expiresAt: r.created_at + timeout * 60000, bank, smsStatus: job?.status || null, smsMode };
-  if (admin) Object.assign(result, { id: r.id, phone: r.phone, smsMessage: job?.message, smsSentAt: job?.sent_at, smsAttemptAt: job?.created_at, smsHistory: db.prepare('SELECT id,status,retry_count AS retryCount,last_error AS lastError,created_at AS createdAt,sent_at AS sentAt FROM sms_jobs WHERE reservation_id=? ORDER BY id DESC').all(r.id) });
+  const result = { reservationCode: r.reservation_code, accessToken: r.access_token, customerName: r.customer_name, depositorName: r.depositor_name, pickupDate: r.pickup_date, pickupSlot: r.pickup_slot, quantity: r.quantity, unitPrice: r.unit_price, expectedAmount: r.expected_amount, status: r.status, pickupCode: r.pickup_code, createdAt: r.created_at, expiresAt: r.created_at + timeout * 60000, bank, smsStatus: job?.status || null, smsMode, smsTestMode: smsMode === 'aligo' && !production && process.env.ALIGO_TEST_MODE === 'Y' };
+  if (admin) Object.assign(result, { id: r.id, phone: r.phone, smsMessage: job?.message, smsSentAt: job?.sent_at, smsAttemptAt: job?.created_at, smsHistory: db.prepare('SELECT id,status,retry_count AS retryCount,last_error AS lastError,provider_message_id AS providerMessageId,created_at AS createdAt,sent_at AS sentAt FROM sms_jobs WHERE reservation_id=? ORDER BY id DESC').all(r.id) });
   return result;
 }
 function enqueue(r) {
@@ -59,16 +65,25 @@ async function worker() {
     });
     if (!job) return;
     try {
-      if (smsMode === 'webhook') {
+      let providerMessageId = null;
+      if (smsMode === 'aligo') {
+        providerMessageId = await sendAligo({
+          phone: job.phone, message: job.message,
+          userId: process.env.ALIGO_USER_ID, apiKey: process.env.ALIGO_API_KEY,
+          sender: process.env.ALIGO_SENDER,
+          testMode: !production && process.env.ALIGO_TEST_MODE === 'Y',
+          url: !production && process.env.ALIGO_API_URL || undefined
+        });
+      } else if (smsMode === 'webhook') {
         const response = await fetch(process.env.SMS_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.SMS_API_KEY || ''}` }, body: JSON.stringify({ phone: job.phone, message: job.message, idempotencyKey: `sms-${job.id}` }), signal: AbortSignal.timeout(10000) });
         const result = await response.json();
         if (!response.ok || result.success !== true) throw new Error(result.error || 'SMS 어댑터 오류');
       } else if (smsMode === 'mock-fail') throw new Error('개발용 문자 실패 시뮬레이션');
       else if (smsMode !== 'mock') throw new Error('지원하지 않는 SMS_MODE');
-      db.prepare("UPDATE sms_jobs SET status='SENT',sent_at=?,last_error=NULL WHERE id=?").run(Date.now(), job.id);
+      db.prepare("UPDATE sms_jobs SET status='SENT',sent_at=?,last_error=NULL,provider_message_id=? WHERE id=?").run(Date.now(), providerMessageId, job.id);
     } catch (error) {
       const attempts = job.retry_count + 1;
-      db.prepare('UPDATE sms_jobs SET status=?,last_error=?,next_attempt=? WHERE id=?').run(attempts >= 3 ? 'FAILED' : 'PENDING', String(error.message).slice(0,300), Date.now() + attempts * 3000, job.id);
+      db.prepare('UPDATE sms_jobs SET status=?,last_error=?,next_attempt=? WHERE id=?').run(smsMode === 'aligo' || attempts >= 3 ? 'FAILED' : 'PENDING', String(error.message).slice(0,300), Date.now() + attempts * 3000, job.id);
     }
   } finally { working = false; }
 }
@@ -92,7 +107,7 @@ const server = http.createServer(async (req,res) => {
       if (!['GET','POST'].includes(req.method)) fail(405,'허용되지 않는 요청입니다.');
       if (req.method === 'POST' && req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) fail(403,'허용되지 않는 출처입니다.');
       expire();
-      if (route === '/api/v1/config' && req.method === 'GET') return json({ unitPrice: price, maxQuantity, dates, slots, bank, timeoutMinutes: timeout, smsMode, inventory: db.prepare('SELECT event_date AS date,reservation_limit-reserved_quantity AS remaining FROM inventory').all() });
+      if (route === '/api/v1/config' && req.method === 'GET') return json({ unitPrice: price, maxQuantity, dates, slots, bank, timeoutMinutes: timeout, smsMode, smsTestMode: smsMode === 'aligo' && !production && process.env.ALIGO_TEST_MODE === 'Y', inventory: db.prepare('SELECT event_date AS date,reservation_limit-reserved_quantity AS remaining FROM inventory').all() });
       if (route === '/api/v1/admin/login' && req.method === 'POST') {
         const key = req.socket.remoteAddress, attempt = loginAttempts.get(key);
         if (attempt && attempt.until > Date.now() && attempt.count >= 5) fail(429,'잠시 후 다시 로그인해주세요.');

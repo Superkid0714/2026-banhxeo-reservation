@@ -4,6 +4,8 @@
 
 ## 실행
 
+Railway 운영 배포는 [Railway + SQLite 배포 안내](docs/railway-deployment.md)를 따르세요. 루트 Dockerfile을 사용하고 `/data` 영구 볼륨을 연결합니다. 알리고 문자 계정·등록된 발신번호와 운영 관리자 비밀번호가 필요합니다.
+
 ```powershell
 Copy-Item .env.example .env
 # .env의 관리자 비밀번호와 계좌 정보를 확인하세요.
@@ -29,7 +31,9 @@ SQLite `BEGIN IMMEDIATE` 트랜잭션으로 재고와 예약·입금 확정·문
 
 기본 `SMS_MODE=mock`에서는 발송 성공 상태를 시뮬레이션하며 실제 문자를 보내지 않습니다. UI에도 개발 모드를 표시합니다. `SMS_MODE=mock-fail`은 3번 실패 후 FAILED 상태가 되어 재발송 화면을 검증할 수 있습니다.
 
-실제 연결은 `SMS_MODE=webhook`, `SMS_WEBHOOK_URL`, `SMS_API_KEY`를 설정합니다. 어댑터에 다음 POST 요청을 전송합니다.
+실제 문자 발송은 `SMS_MODE=aligo`와 `ALIGO_USER_ID`, `ALIGO_API_KEY`, `ALIGO_SENDER`를 설정합니다. 발신번호는 알리고에 등록·승인한 번호여야 하며 숫자만 입력합니다. 알리고 문자 API에 LMS로 접수하고 메시지 ID를 저장합니다. `SENT`는 업체 접수 상태이며 실제 단말 수신은 알리고 발송 내역에서 확인해야 합니다. 응답을 받지 못해 접수 여부가 불분명한 작업은 중복 발송을 막기 위해 자동 재시도하지 않습니다. 관리자 재발송 전에 알리고 발송 내역을 확인하세요. 개발 환경의 `ALIGO_TEST_MODE=Y`는 실제 발송·과금 없이 알리고 연동을 시험하며 운영 환경에서는 금지됩니다. [알리고 API 문서](https://smartsms.aligo.in/admin/api/spec.html)
+
+기존 범용 웹훅 연결을 사용하려면 `SMS_MODE=webhook`, `SMS_WEBHOOK_URL`, `SMS_API_KEY`를 설정합니다. 어댑터에 다음 POST 요청을 전송합니다.
 
 ```json
 {"phone":"01012345678","message":"확정 안내 내용","idempotencyKey":"sms-1"}
