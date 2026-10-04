@@ -4,7 +4,7 @@
 
 ## 실행
 
-Railway 운영 배포는 [Railway + SQLite 배포 안내](docs/railway-deployment.md)를 따르세요. 루트 Dockerfile을 사용하고 `/data` 영구 볼륨을 연결합니다. 알리고 문자 계정·등록된 발신번호와 운영 관리자 비밀번호가 필요합니다.
+Railway 운영 배포는 [Railway + SQLite 배포 안내](docs/railway-deployment.md)를 따르세요. 루트 Dockerfile을 사용하고 `/data` 영구 볼륨을 연결합니다. SOLAPI 문자 계정·등록된 발신번호와 운영 관리자 비밀번호가 필요합니다.
 
 ```powershell
 Copy-Item .env.example .env
@@ -31,7 +31,9 @@ SQLite `BEGIN IMMEDIATE` 트랜잭션으로 재고와 예약·입금 확정·문
 
 기본 `SMS_MODE=mock`에서는 발송 성공 상태를 시뮬레이션하며 실제 문자를 보내지 않습니다. UI에도 개발 모드를 표시합니다. `SMS_MODE=mock-fail`은 3번 실패 후 FAILED 상태가 되어 재발송 화면을 검증할 수 있습니다.
 
-실제 문자 발송은 `SMS_MODE=aligo`와 `ALIGO_USER_ID`, `ALIGO_API_KEY`, `ALIGO_SENDER`를 설정합니다. 발신번호는 알리고에 등록·승인한 번호여야 하며 숫자만 입력합니다. 알리고 문자 API에 LMS로 접수하고 메시지 ID를 저장합니다. `SENT`는 업체 접수 상태이며 실제 단말 수신은 알리고 발송 내역에서 확인해야 합니다. 응답을 받지 못해 접수 여부가 불분명한 작업은 중복 발송을 막기 위해 자동 재시도하지 않습니다. 관리자 재발송 전에 알리고 발송 내역을 확인하세요. 개발 환경의 `ALIGO_TEST_MODE=Y`는 실제 발송·과금 없이 알리고 연동을 시험하며 운영 환경에서는 금지됩니다. [알리고 API 문서](https://smartsms.aligo.in/admin/api/spec.html)
+개인 계정으로 시작할 경우 [SOLAPI 개인 계정 안내](https://solapi.com/account-business)에 따라 가입·본인 인증을 마치고 발신번호를 등록합니다. API 키와 시크릿을 발급받은 뒤 `SMS_MODE=solapi`, `SOLAPI_API_KEY`, `SOLAPI_API_SECRET`, `SOLAPI_SENDER`를 설정합니다. 발신번호는 숫자만 입력합니다. 문자 접수 ID를 저장하며 `SENT`는 업체 접수 상태입니다. 실제 단말 수신 여부는 SOLAPI 발송 내역에서 확인해야 합니다. 응답을 받지 못한 작업은 중복 발송을 막기 위해 자동 재시도하지 않습니다. 관리자 재발송 전에 업체 내역을 확인하세요. [SOLAPI API 문서](https://solapi.com/developers/api/messages)
+
+알리고 계정을 사용할 수 있다면 `SMS_MODE=aligo`와 `ALIGO_USER_ID`, `ALIGO_API_KEY`, `ALIGO_SENDER`도 지원합니다. 개발 환경의 `ALIGO_TEST_MODE=Y`는 실제 발송·과금 없이 알리고 연동을 시험하며 운영 환경에서는 금지됩니다. [알리고 API 문서](https://smartsms.aligo.in/admin/api/spec.html)
 
 기존 범용 웹훅 연결을 사용하려면 `SMS_MODE=webhook`, `SMS_WEBHOOK_URL`, `SMS_API_KEY`를 설정합니다. 어댑터에 다음 POST 요청을 전송합니다.
 
@@ -52,7 +54,7 @@ npm test
 
 ## 실제 운영 전에 확정할 항목
 
-계좌·예금주, 날짜별 예약 한도, 환불 상세 기준, 담당자 연락처, 개인정보 보유기간 및 삭제 절차, 문자 업체·발신번호·어댑터를 확정해야 합니다. 현재 동의 안내는 검토용 문구이며 개인정보 자동 삭제는 구현하지 않았습니다. HTTPS 배포와 `NODE_ENV=production`을 사용하세요. 운영 모드는 기본 비밀번호·16자 미만 비밀번호·개발용 SMS 설정을 거부합니다. 외부 접속은 HOST를 설정해야 합니다.
+계좌·예금주, 날짜별 예약 한도, 환불 상세 기준, 담당자 연락처, 개인정보 보유기간 및 삭제 절차, 문자 업체·발신번호를 확정해야 합니다. 현재 동의 안내는 검토용 문구이며 개인정보 자동 삭제는 구현하지 않았습니다. HTTPS 배포와 `NODE_ENV=production`을 사용하세요. 운영 모드는 기본 비밀번호·16자 미만 비밀번호·개발용 SMS 설정을 거부합니다. 외부 접속은 HOST를 설정해야 합니다.
 
 현재 구조는 단일 서버·SQLite 운영에 맞춰져 있습니다. 여러 서버를 함께 실행하려면 PostgreSQL, 공유 인증 저장소와 작업 선점 구조로 전환해야 합니다. DESIGN.md는 제공되지 않아 첨부 이미지와 Figma의 공통 디자인 가이드를 기준으로 사용했습니다. 음식 사진은 첨부한 사전예약 화면의 상품 사진 영역을 표시합니다.
 

@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sendAligo } from './aligo.mjs';
+import { sendSolapi } from './solapi.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.env.NODE_ENV === 'production';
@@ -13,8 +14,9 @@ const adminPassword = process.env.ADMIN_PASSWORD || 'banhxeo-local-2026';
 const smsMode = process.env.SMS_MODE || 'mock';
 if (production && (adminPassword.length < 16 || ['banhxeo-local-2026','change-this-before-deploying'].includes(adminPassword))) throw new Error('운영 환경의 관리자 비밀번호를 설정하세요.');
 if (production && smsMode === 'aligo' && (!process.env.ALIGO_USER_ID || !process.env.ALIGO_API_KEY || !/^\d{8,16}$/.test(process.env.ALIGO_SENDER || '') || process.env.ALIGO_TEST_MODE === 'Y')) throw new Error('운영 환경의 알리고 계정, API 키, 등록된 발신번호를 설정하세요.');
+if (production && smsMode === 'solapi' && (!process.env.SOLAPI_API_KEY || !process.env.SOLAPI_API_SECRET || !/^\d{8,16}$/.test(process.env.SOLAPI_SENDER || ''))) throw new Error('운영 환경의 SOLAPI API 키, 시크릿, 등록된 발신번호를 설정하세요.');
 if (production && smsMode === 'webhook' && !process.env.SMS_WEBHOOK_URL?.startsWith('https://')) throw new Error('운영 환경의 HTTPS SMS 어댑터를 설정하세요.');
-if (production && !['aligo','webhook'].includes(smsMode)) throw new Error('운영 환경의 실제 문자 발송 방식을 설정하세요.');
+if (production && !['aligo','solapi','webhook'].includes(smsMode)) throw new Error('운영 환경의 실제 문자 발송 방식을 설정하세요.');
 const numeric = (key, fallback) => { const v = Number(process.env[key] || fallback); if (!Number.isSafeInteger(v) || v < 1) throw new Error(`Invalid ${key}`); return v; };
 const price = numeric('RESERVATION_UNIT_PRICE', 5500), limit = numeric('RESERVATION_LIMIT', 100), maxQuantity = numeric('MAX_ORDER_QUANTITY', 5), timeout = numeric('PAYMENT_TIMEOUT_MINUTES', 60);
 const dates = ['2026-10-06', '2026-10-07'], slots = ['17:30-19:00', '19:00-20:30', '20:30-22:00'];
@@ -30,7 +32,7 @@ CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires_at INTEGER 
 CREATE INDEX IF NOT EXISTS sms_pending ON sms_jobs(status,next_attempt);`);
 if (!db.prepare('PRAGMA table_info(sms_jobs)').all().some(column => column.name === 'provider_message_id')) db.exec('ALTER TABLE sms_jobs ADD COLUMN provider_message_id TEXT');
 for (const date of dates) db.prepare('INSERT INTO inventory(event_date,reservation_limit) VALUES (?,?) ON CONFLICT(event_date) DO UPDATE SET reservation_limit=excluded.reservation_limit').run(date, limit);
-if (smsMode === 'aligo') db.prepare("UPDATE sms_jobs SET status='FAILED',last_error='서버 재시작 전 문자 접수 여부를 알 수 없습니다. 알리고 발송 내역을 확인하세요.' WHERE status='SENDING'").run();
+if (['aligo','solapi'].includes(smsMode)) db.prepare("UPDATE sms_jobs SET status='FAILED',last_error='서버 재시작 전 문자 접수 여부를 알 수 없습니다. 문자 업체의 발송 내역을 확인하세요.' WHERE status='SENDING'").run();
 else db.prepare("UPDATE sms_jobs SET status='PENDING' WHERE status='SENDING'").run();
 const transaction = fn => { db.exec('BEGIN IMMEDIATE'); try { const result = fn(); db.exec('COMMIT'); return result; } catch (e) { db.exec('ROLLBACK'); throw e; } };
 const fail = (status, message, fields) => { throw Object.assign(new Error(message), { status, fields }); };
@@ -74,6 +76,13 @@ async function worker() {
           testMode: !production && process.env.ALIGO_TEST_MODE === 'Y',
           url: !production && process.env.ALIGO_API_URL || undefined
         });
+      } else if (smsMode === 'solapi') {
+        providerMessageId = await sendSolapi({
+          phone: job.phone, message: job.message,
+          apiKey: process.env.SOLAPI_API_KEY, apiSecret: process.env.SOLAPI_API_SECRET,
+          sender: process.env.SOLAPI_SENDER,
+          url: !production && process.env.SOLAPI_API_URL || undefined
+        });
       } else if (smsMode === 'webhook') {
         const response = await fetch(process.env.SMS_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.SMS_API_KEY || ''}` }, body: JSON.stringify({ phone: job.phone, message: job.message, idempotencyKey: `sms-${job.id}` }), signal: AbortSignal.timeout(10000) });
         const result = await response.json();
@@ -83,7 +92,7 @@ async function worker() {
       db.prepare("UPDATE sms_jobs SET status='SENT',sent_at=?,last_error=NULL,provider_message_id=? WHERE id=?").run(Date.now(), providerMessageId, job.id);
     } catch (error) {
       const attempts = job.retry_count + 1;
-      db.prepare('UPDATE sms_jobs SET status=?,last_error=?,next_attempt=? WHERE id=?').run(smsMode === 'aligo' || attempts >= 3 ? 'FAILED' : 'PENDING', String(error.message).slice(0,300), Date.now() + attempts * 3000, job.id);
+      db.prepare('UPDATE sms_jobs SET status=?,last_error=?,next_attempt=? WHERE id=?').run(['aligo','solapi'].includes(smsMode) || attempts >= 3 ? 'FAILED' : 'PENDING', String(error.message).slice(0,300), Date.now() + attempts * 3000, job.id);
     }
   } finally { working = false; }
 }

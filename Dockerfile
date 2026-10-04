@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 
 # Copy only the runtime files; local reservations and credentials stay outside.
-COPY package.json server.mjs aligo.mjs ./
+COPY package.json server.mjs aligo.mjs solapi.mjs ./
 COPY public/ ./public/
 
 RUN npm run check
