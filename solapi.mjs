@@ -2,7 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 
 const endpoint = 'https://api.solapi.com/messages/v4/send-many/detail';
 
-export async function sendSolapi({ phone, message, apiKey, apiSecret, sender, fetcher = fetch, url = endpoint, now = () => new Date(), salt = () => randomBytes(16).toString('hex') }) {
+export async function sendSolapi({ phone, message, apiKey, apiSecret, sender, imageId, fetcher = fetch, url = endpoint, now = () => new Date(), salt = () => randomBytes(16).toString('hex') }) {
   const date = now().toISOString();
   const nonce = salt();
   const signature = createHmac('sha256', apiSecret).update(date + nonce).digest('hex');
@@ -12,7 +12,7 @@ export async function sendSolapi({ phone, message, apiKey, apiSecret, sender, fe
       'Content-Type': 'application/json',
       Authorization: `HMAC-SHA256 apiKey=${apiKey}, date=${date}, salt=${nonce}, signature=${signature}`
     },
-    body: JSON.stringify({ messages: [{ to: phone, from: sender, text: message }] }),
+    body: JSON.stringify({ messages: [{ to: phone, from: sender, text: message, subject: '용봉대동풀이 예약 확정', ...(imageId ? { imageId } : {}) }] }),
     signal: AbortSignal.timeout(10000)
   });
   const result = await response.json();

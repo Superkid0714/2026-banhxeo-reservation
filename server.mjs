@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sendAligo } from './aligo.mjs';
 import { sendSolapi } from './solapi.mjs';
+import { sendSendon } from './sendon.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const production = process.env.NODE_ENV === 'production';
@@ -15,8 +16,9 @@ const smsMode = process.env.SMS_MODE || 'mock';
 if (production && (adminPassword.length < 16 || ['banhxeo-local-2026','change-this-before-deploying'].includes(adminPassword))) throw new Error('운영 환경의 관리자 비밀번호를 설정하세요.');
 if (production && smsMode === 'aligo' && (!process.env.ALIGO_USER_ID || !process.env.ALIGO_API_KEY || !/^\d{8,16}$/.test(process.env.ALIGO_SENDER || '') || process.env.ALIGO_TEST_MODE === 'Y')) throw new Error('운영 환경의 알리고 계정, API 키, 등록된 발신번호를 설정하세요.');
 if (production && smsMode === 'solapi' && (!process.env.SOLAPI_API_KEY || !process.env.SOLAPI_API_SECRET || !/^\d{8,16}$/.test(process.env.SOLAPI_SENDER || ''))) throw new Error('운영 환경의 SOLAPI API 키, 시크릿, 등록된 발신번호를 설정하세요.');
+if (production && smsMode === 'sendon' && (!process.env.SENDON_USER_ID || !process.env.SENDON_API_KEY || !/^\d{8,16}$/.test(process.env.SENDON_SENDER || ''))) throw new Error('운영 환경의 센드온 계정 ID, API 키, 등록된 발신번호를 설정하세요.');
 if (production && smsMode === 'webhook' && !process.env.SMS_WEBHOOK_URL?.startsWith('https://')) throw new Error('운영 환경의 HTTPS SMS 어댑터를 설정하세요.');
-if (production && !['aligo','solapi','webhook'].includes(smsMode)) throw new Error('운영 환경의 실제 문자 발송 방식을 설정하세요.');
+if (production && !['aligo','solapi','sendon','webhook'].includes(smsMode)) throw new Error('운영 환경의 실제 문자 발송 방식을 설정하세요.');
 const numeric = (key, fallback) => { const v = Number(process.env[key] || fallback); if (!Number.isSafeInteger(v) || v < 1) throw new Error(`Invalid ${key}`); return v; };
 const price = numeric('RESERVATION_UNIT_PRICE', 5500), limit = numeric('RESERVATION_LIMIT', 100), maxQuantity = numeric('MAX_ORDER_QUANTITY', 5), timeout = numeric('PAYMENT_TIMEOUT_MINUTES', 60);
 const dates = ['2026-10-06', '2026-10-07'], slots = ['17:30-19:00', '19:00-20:30', '20:30-22:00'];
@@ -32,7 +34,7 @@ CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires_at INTEGER 
 CREATE INDEX IF NOT EXISTS sms_pending ON sms_jobs(status,next_attempt);`);
 if (!db.prepare('PRAGMA table_info(sms_jobs)').all().some(column => column.name === 'provider_message_id')) db.exec('ALTER TABLE sms_jobs ADD COLUMN provider_message_id TEXT');
 for (const date of dates) db.prepare('INSERT INTO inventory(event_date,reservation_limit) VALUES (?,?) ON CONFLICT(event_date) DO UPDATE SET reservation_limit=excluded.reservation_limit').run(date, limit);
-if (['aligo','solapi'].includes(smsMode)) db.prepare("UPDATE sms_jobs SET status='FAILED',last_error='서버 재시작 전 문자 접수 여부를 알 수 없습니다. 문자 업체의 발송 내역을 확인하세요.' WHERE status='SENDING'").run();
+if (['aligo','solapi','sendon'].includes(smsMode)) db.prepare("UPDATE sms_jobs SET status='FAILED',last_error='서버 재시작 전 문자 접수 여부를 알 수 없습니다. 문자 업체의 발송 내역을 확인하세요.' WHERE status='SENDING'").run();
 else db.prepare("UPDATE sms_jobs SET status='PENDING' WHERE status='SENDING'").run();
 const transaction = fn => { db.exec('BEGIN IMMEDIATE'); try { const result = fn(); db.exec('COMMIT'); return result; } catch (e) { db.exec('ROLLBACK'); throw e; } };
 const fail = (status, message, fields) => { throw Object.assign(new Error(message), { status, fields }); };
@@ -53,7 +55,7 @@ function serialize(r, admin = false) {
   return result;
 }
 function enqueue(r) {
-  const message = `[반쎄오갱기데스까]\n\n${r.customer_name}님,\n사전예약이 확정되었습니다.\n\n치즈 불닭 반쎄오 ${r.quantity}개\n\n수령일\n10월 ${Number(r.pickup_date.slice(-2))}일\n\n예상 방문시간\n${r.pickup_slot}\n\n수령코드\n${r.pickup_code}\n\n현장에서 해당 코드를 보여주세요.\n감사합니다.`;
+  const message = `[반쎄오갱기데스까]\n${r.customer_name}님, 예약이 확정됐어요.\n\n행사: 전남대 용봉대동풀이\n수령 장소: 후문 야간부스 15번\n메뉴: 치즈 불닭 반쎄오 ${r.quantity}개\n수령: 10월 ${Number(r.pickup_date.slice(-2))}일 ${r.pickup_slot.replace('-', '~')}\n수령코드: ${r.pickup_code}\n\n현장에서 수령코드를 입력해 주세요.\n감사합니다.`;
   db.prepare("INSERT INTO sms_jobs(reservation_id,phone,message,status,created_at,next_attempt) VALUES (?,?,?,'PENDING',?,?)").run(r.id, r.phone, message, Date.now(), Date.now());
 }
 let working = false;
@@ -81,7 +83,15 @@ async function worker() {
           phone: job.phone, message: job.message,
           apiKey: process.env.SOLAPI_API_KEY, apiSecret: process.env.SOLAPI_API_SECRET,
           sender: process.env.SOLAPI_SENDER,
+          imageId: process.env.SOLAPI_IMAGE_ID || undefined,
           url: !production && process.env.SOLAPI_API_URL || undefined
+        });
+      } else if (smsMode === 'sendon') {
+        providerMessageId = await sendSendon({
+          phone: job.phone, message: job.message,
+          userId: process.env.SENDON_USER_ID, apiKey: process.env.SENDON_API_KEY,
+          sender: process.env.SENDON_SENDER,
+          url: !production && process.env.SENDON_API_URL || undefined
         });
       } else if (smsMode === 'webhook') {
         const response = await fetch(process.env.SMS_WEBHOOK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.SMS_API_KEY || ''}` }, body: JSON.stringify({ phone: job.phone, message: job.message, idempotencyKey: `sms-${job.id}` }), signal: AbortSignal.timeout(10000) });
@@ -92,7 +102,7 @@ async function worker() {
       db.prepare("UPDATE sms_jobs SET status='SENT',sent_at=?,last_error=NULL,provider_message_id=? WHERE id=?").run(Date.now(), providerMessageId, job.id);
     } catch (error) {
       const attempts = job.retry_count + 1;
-      db.prepare('UPDATE sms_jobs SET status=?,last_error=?,next_attempt=? WHERE id=?').run(['aligo','solapi'].includes(smsMode) || attempts >= 3 ? 'FAILED' : 'PENDING', String(error.message).slice(0,300), Date.now() + attempts * 3000, job.id);
+      db.prepare('UPDATE sms_jobs SET status=?,last_error=?,next_attempt=? WHERE id=?').run(['aligo','solapi','sendon'].includes(smsMode) || attempts >= 3 ? 'FAILED' : 'PENDING', String(error.message).slice(0,300), Date.now() + attempts * 3000, job.id);
     }
   } finally { working = false; }
 }

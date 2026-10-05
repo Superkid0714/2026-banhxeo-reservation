@@ -13,9 +13,19 @@ test('SOLAPI 요청에 문자 한 건과 HMAC 인증을 담고 접수 ID를 저�
   };
   assert.equal(await sendSolapi({ ...details, fetcher }), 'message-1');
   assert.equal(request.url, 'https://api.solapi.com/messages/v4/send-many/detail');
-  assert.deepEqual(JSON.parse(request.options.body), { messages: [{ to: details.phone, from: details.sender, text: details.message }] });
+  assert.deepEqual(JSON.parse(request.options.body), { messages: [{ to: details.phone, from: details.sender, text: details.message, subject: '용봉대동풀이 예약 확정' }] });
   const signature = createHmac('sha256', details.apiSecret).update('2026-10-04T00:00:00.000Z' + details.salt()).digest('hex');
   assert.equal(request.options.headers.Authorization, `HMAC-SHA256 apiKey=test-key, date=2026-10-04T00:00:00.000Z, salt=${details.salt()}, signature=${signature}`);
+});
+
+test('이미지 ID를 설정하면 사진문자로 접수한다', async () => {
+  let body;
+  const fetcher = async (_, options) => {
+    body = JSON.parse(options.body);
+    return { ok: true, json: async () => ({ groupInfo: { groupId: 'group-1', count: { registeredSuccess: 1 } }, messageList: [{ messageId: 'message-1' }] }) };
+  };
+  await sendSolapi({ ...details, imageId: 'ST01FZ00000000000000000000000000', fetcher });
+  assert.equal(body.messages[0].imageId, 'ST01FZ00000000000000000000000000');
 });
 
 test('HTTP 성공이어도 접수 거부 또는 접수 건수 오류는 실패로 처리한다', async () => {
