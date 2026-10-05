@@ -43,10 +43,10 @@ test('입금 확정 후 알리고에 한 건을 접수하고 메시지 ID를 기
   });
   await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
   const port = provider.address().port;
-  const appPort = 3102;
+  const appPort = 3105;
   const child = spawn(process.execPath, ['server.mjs'], {
     env: { ...process.env, PORT: String(appPort), DATA_DIR: dir, ADMIN_USERNAME: 'tester', ADMIN_PASSWORD: 'test-secret',
-      SMS_MODE: 'aligo', ALIGO_USER_ID: 'operator', ALIGO_API_KEY: 'test-key', ALIGO_SENDER: '0212345678',
+      PREORDER_CLOSE_AT: '2099-10-06T00:00:00+09:00', SMS_MODE: 'aligo', ALIGO_USER_ID: 'operator', ALIGO_API_KEY: 'test-key', ALIGO_SENDER: '0212345678',
       ALIGO_API_URL: `http://127.0.0.1:${port}/send/` },
     stdio: ['ignore', 'pipe', 'pipe']
   });
