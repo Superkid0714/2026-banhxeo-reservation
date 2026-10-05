@@ -20,20 +20,24 @@ if (production && smsMode === 'sendon' && (!process.env.SENDON_USER_ID || !proce
 if (production && smsMode === 'webhook' && !process.env.SMS_WEBHOOK_URL?.startsWith('https://')) throw new Error('운영 환경의 HTTPS SMS 어댑터를 설정하세요.');
 if (production && !['aligo','solapi','sendon','webhook'].includes(smsMode)) throw new Error('운영 환경의 실제 문자 발송 방식을 설정하세요.');
 const numeric = (key, fallback) => { const v = Number(process.env[key] || fallback); if (!Number.isSafeInteger(v) || v < 1) throw new Error(`Invalid ${key}`); return v; };
-const price = numeric('RESERVATION_UNIT_PRICE', 5500), limit = numeric('RESERVATION_LIMIT', 100), maxQuantity = numeric('MAX_ORDER_QUANTITY', 5), timeout = numeric('PAYMENT_TIMEOUT_MINUTES', 60);
+const price = numeric('RESERVATION_UNIT_PRICE', 5500), maxQuantity = numeric('MAX_ORDER_QUANTITY', 5), timeout = numeric('PAYMENT_TIMEOUT_MINUTES', 1440);
 const dates = ['2026-10-06', '2026-10-07'], slots = ['17:30-19:00', '19:00-20:30', '20:30-22:00'];
+const preorderCloseAt = Date.parse(process.env.PREORDER_CLOSE_AT || '2026-10-06T00:00:00+09:00');
+if (!Number.isFinite(preorderCloseAt)) throw new Error('Invalid PREORDER_CLOSE_AT');
 const bank = { bankName: process.env.BANK_NAME || '토스뱅크', accountNumber: process.env.BANK_ACCOUNT || '1002-7788-0098', accountHolder: process.env.BANK_ACCOUNT_HOLDER || '이요셉' };
 const dataDir = process.env.DATA_DIR || path.join(root, 'data');
 mkdirSync(dataDir, { recursive: true });
 const db = new DatabaseSync(path.join(dataDir, 'reservations.sqlite'));
+// reservation_limit is a legacy SQLite column retained for existing deployments; no cap is enforced.
 db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS inventory (event_date TEXT PRIMARY KEY, reservation_limit INTEGER NOT NULL, reserved_quantity INTEGER NOT NULL DEFAULT 0, paid_quantity INTEGER NOT NULL DEFAULT 0, sequence INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS reservations (id INTEGER PRIMARY KEY, reservation_code TEXT UNIQUE NOT NULL, access_token TEXT UNIQUE NOT NULL, customer_name TEXT NOT NULL, phone TEXT NOT NULL, depositor_name TEXT NOT NULL, pickup_date TEXT NOT NULL REFERENCES inventory(event_date), pickup_slot TEXT NOT NULL, quantity INTEGER NOT NULL, unit_price INTEGER NOT NULL, expected_amount INTEGER NOT NULL, status TEXT NOT NULL, pickup_code TEXT UNIQUE, privacy_agreed INTEGER NOT NULL, refund_agreed INTEGER NOT NULL, created_at INTEGER NOT NULL, paid_at INTEGER, expired_at INTEGER);
 CREATE TABLE IF NOT EXISTS sms_jobs (id INTEGER PRIMARY KEY, reservation_id INTEGER NOT NULL REFERENCES reservations(id), phone TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL, retry_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at INTEGER NOT NULL, next_attempt INTEGER NOT NULL, sent_at INTEGER);
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS sms_pending ON sms_jobs(status,next_attempt);`);
+CREATE INDEX IF NOT EXISTS sms_pending ON sms_jobs(status,next_attempt);
+CREATE INDEX IF NOT EXISTS reservations_phone ON reservations(phone);`);
 if (!db.prepare('PRAGMA table_info(sms_jobs)').all().some(column => column.name === 'provider_message_id')) db.exec('ALTER TABLE sms_jobs ADD COLUMN provider_message_id TEXT');
-for (const date of dates) db.prepare('INSERT INTO inventory(event_date,reservation_limit) VALUES (?,?) ON CONFLICT(event_date) DO UPDATE SET reservation_limit=excluded.reservation_limit').run(date, limit);
+for (const date of dates) db.prepare('INSERT INTO inventory(event_date,reservation_limit) VALUES (?,0) ON CONFLICT(event_date) DO NOTHING').run(date);
 if (['aligo','solapi','sendon'].includes(smsMode)) db.prepare("UPDATE sms_jobs SET status='FAILED',last_error='서버 재시작 전 문자 접수 여부를 알 수 없습니다. 문자 업체의 발송 내역을 확인하세요.' WHERE status='SENDING'").run();
 else db.prepare("UPDATE sms_jobs SET status='PENDING' WHERE status='SENDING'").run();
 const transaction = fn => { db.exec('BEGIN IMMEDIATE'); try { const result = fn(); db.exec('COMMIT'); return result; } catch (e) { db.exec('ROLLBACK'); throw e; } };
@@ -114,7 +118,10 @@ function authenticate(req) {
 }
 async function body(req) {
   let value = ''; for await (const chunk of req) { value += chunk; if (value.length > 16384) fail(413, '요청이 너무 큽니다.'); }
-  try { return JSON.parse(value || '{}'); } catch { fail(400, '올바른 JSON을 입력해주세요.'); }
+  let parsed;
+  try { parsed = JSON.parse(value || '{}'); } catch { fail(400, '올바른 JSON을 입력해주세요.'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail(400, 'JSON 객체를 입력해주세요.');
+  return parsed;
 }
 const server = http.createServer(async (req,res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
@@ -126,7 +133,7 @@ const server = http.createServer(async (req,res) => {
       if (!['GET','POST'].includes(req.method)) fail(405,'허용되지 않는 요청입니다.');
       if (req.method === 'POST' && req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) fail(403,'허용되지 않는 출처입니다.');
       expire();
-      if (route === '/api/v1/config' && req.method === 'GET') return json({ unitPrice: price, maxQuantity, dates, slots, bank, timeoutMinutes: timeout, smsMode, smsTestMode: smsMode === 'aligo' && !production && process.env.ALIGO_TEST_MODE === 'Y', inventory: db.prepare('SELECT event_date AS date,reservation_limit-reserved_quantity AS remaining FROM inventory').all() });
+      if (route === '/api/v1/config' && req.method === 'GET') return json({ unitPrice: price, maxQuantity, dates, slots, preorderClosed: Date.now() >= preorderCloseAt, bank, timeoutMinutes: timeout, smsMode, smsTestMode: smsMode === 'aligo' && !production && process.env.ALIGO_TEST_MODE === 'Y' });
       if (route === '/api/v1/admin/login' && req.method === 'POST') {
         const key = req.socket.remoteAddress, attempt = loginAttempts.get(key);
         if (attempt && attempt.until > Date.now() && attempt.count >= 5) fail(429,'잠시 후 다시 로그인해주세요.');
@@ -152,8 +159,12 @@ const server = http.createServer(async (req,res) => {
         if (b.refundPolicyAgreed!==true) fields.refundPolicyAgreed='사전예약 및 환불 안내에 동의해주세요.';
         if (Object.keys(fields).length) fail(422,'입력 내용을 확인해주세요.',fields);
         const r = transaction(() => {
+          if (Date.now() >= preorderCloseAt) fail(409,'사전예약 접수가 종료되었습니다.');
+          if (db.prepare('SELECT count(*) AS count FROM reservations WHERE phone=?').get(phone).count >= 2) {
+            const message='같은 전화번호로는 최대 2회까지 예약할 수 있습니다.';
+            fail(409,message,{phone:message});
+          }
           const inv = db.prepare('SELECT * FROM inventory WHERE event_date=?').get(b.pickupDate);
-          if (inv.reserved_quantity+b.quantity>inv.reservation_limit) fail(409,'선택한 날짜의 사전예약 수량이 소진되었습니다.');
           db.prepare('UPDATE inventory SET reserved_quantity=reserved_quantity+?,sequence=sequence+1 WHERE event_date=?').run(b.quantity,b.pickupDate);
           const code=`BANH-${b.pickupDate.slice(5).replace('-','')}-${String(inv.sequence+1).padStart(4,'0')}`;
           const inserted = db.prepare("INSERT INTO reservations(reservation_code,access_token,customer_name,phone,depositor_name,pickup_date,pickup_slot,quantity,unit_price,expected_amount,status,privacy_agreed,refund_agreed,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,'WAITING_PAYMENT',1,1,?)").run(code,randomBytes(24).toString('hex'),b.customerName.trim(),phone,b.depositorName.trim(),b.pickupDate,b.pickupSlot,b.quantity,price,price*b.quantity,Date.now());
@@ -167,7 +178,13 @@ const server = http.createServer(async (req,res) => {
       if (route === '/api/v1/admin/reservations' && req.method==='GET') {
         const all=db.prepare('SELECT * FROM reservations ORDER BY created_at DESC').all().map(r=>serialize(r,true));
         const q=(url.searchParams.get('q')||'').trim().toLowerCase(), filter=url.searchParams.get('status')||'WAITING_PAYMENT';
-        return json({ counts:{ waiting:all.filter(r=>r.status==='WAITING_PAYMENT').length,paid:all.filter(r=>r.status==='PAID').length,failed:all.filter(r=>r.smsStatus==='FAILED').length }, reservations:all.filter(r=>(filter==='ALL'||(filter==='SMS_FAILED'?r.smsStatus==='FAILED':r.status===filter))&&(!q||[r.customerName,r.depositorName,r.phone,r.reservationCode].some(v=>v.toLowerCase().includes(q.replace(/-/g, v===r.phone?'':'-'))))) });
+        const dailyQuantities=dates.map(date=>{
+          const dayReservations=all.filter(r=>r.pickupDate===date);
+          const waitingQuantity=dayReservations.filter(r=>r.status==='WAITING_PAYMENT').reduce((sum,r)=>sum+r.quantity,0);
+          const paidQuantity=dayReservations.filter(r=>r.status==='PAID').reduce((sum,r)=>sum+r.quantity,0);
+          return {date,totalQuantity:waitingQuantity+paidQuantity,waitingQuantity,paidQuantity};
+        });
+        return json({ counts:{ waiting:all.filter(r=>r.status==='WAITING_PAYMENT').length,expired:all.filter(r=>r.status==='EXPIRED').length,paid:all.filter(r=>r.status==='PAID').length,failed:all.filter(r=>r.smsStatus==='FAILED').length }, dailyQuantities, reservations:all.filter(r=>(filter==='ALL'||(filter==='SMS_FAILED'?r.smsStatus==='FAILED':r.status===filter))&&(!q||[r.customerName,r.depositorName,r.phone,r.reservationCode].some(v=>v.toLowerCase().includes(q.replace(/-/g, v===r.phone?'':'-'))))) });
       }
       const adminDetail=/^\/api\/v1\/admin\/reservations\/(\d+)$/.exec(route);
       if (adminDetail && req.method==='GET') {
@@ -175,15 +192,34 @@ const server = http.createServer(async (req,res) => {
         if(!r) fail(404,'예약을 찾을 수 없습니다.');
         return json(serialize(r,true));
       }
+      const deletion=/^\/api\/v1\/admin\/reservations\/(\d+)\/delete$/.exec(route);
+      if (deletion && req.method==='POST') {
+        const b=await body(req);
+        transaction(()=>{
+          const r=db.prepare('SELECT * FROM reservations WHERE id=?').get(Number(deletion[1]));
+          if(!r) fail(404,'예약을 찾을 수 없습니다.');
+          if(typeof b.confirmationName!=='string' || b.confirmationName.trim()!==r.customer_name) fail(422,'예약자 이름이 일치하지 않습니다.');
+          if(r.status==='PAID' && b.paymentReviewed!==true) fail(422,'입금·환불 처리 여부를 확인해 주세요.');
+          if(db.prepare("SELECT id FROM sms_jobs WHERE reservation_id=? AND status='SENDING'").get(r.id)) fail(409,'문자 발송이 진행 중입니다. 잠시 후 다시 시도해 주세요.');
+          db.prepare('DELETE FROM sms_jobs WHERE reservation_id=?').run(r.id);
+          db.prepare('DELETE FROM reservations WHERE id=?').run(r.id);
+          if(r.status==='WAITING_PAYMENT') db.prepare('UPDATE inventory SET reserved_quantity=reserved_quantity-? WHERE event_date=?').run(r.quantity,r.pickup_date);
+          if(r.status==='PAID') db.prepare('UPDATE inventory SET reserved_quantity=reserved_quantity-?,paid_quantity=paid_quantity-? WHERE event_date=?').run(r.quantity,r.quantity,r.pickup_date);
+        });
+        return json({ok:true});
+      }
       const action=/^\/api\/v1\/admin\/reservations\/(\d+)\/(confirm-payment|sms\/retry)$/.exec(route);
       if (action && req.method==='POST') {
         const b=await body(req); const r=transaction(()=>{
           let r=db.prepare('SELECT * FROM reservations WHERE id=?').get(Number(action[1])); if(!r) fail(404,'예약을 찾을 수 없습니다.');
           if(action[2]==='confirm-payment') {
-            if(r.status!=='WAITING_PAYMENT') fail(409,'이미 처리되었거나 만료된 예약입니다.');
+            if(!['WAITING_PAYMENT','EXPIRED'].includes(r.status)) fail(409,'이미 처리된 예약입니다.');
             if(b.confirmedAmount!==r.expected_amount) fail(422,'입금 금액이 예약 금액과 다릅니다.');
+            if(r.status==='EXPIRED') {
+              db.prepare('UPDATE inventory SET reserved_quantity=reserved_quantity+? WHERE event_date=?').run(r.quantity,r.pickup_date);
+            }
             let code; do { code=String(randomInt(100000,1000000)); } while(db.prepare('SELECT id FROM reservations WHERE pickup_code=?').get(code));
-            db.prepare("UPDATE reservations SET status='PAID',pickup_code=?,paid_at=? WHERE id=? AND status='WAITING_PAYMENT'").run(code,Date.now(),r.id);
+            db.prepare("UPDATE reservations SET status='PAID',pickup_code=?,paid_at=?,expired_at=NULL WHERE id=?").run(code,Date.now(),r.id);
             db.prepare('UPDATE inventory SET paid_quantity=paid_quantity+? WHERE event_date=?').run(r.quantity,r.pickup_date);
             r=db.prepare('SELECT * FROM reservations WHERE id=?').get(r.id);
           } else {
