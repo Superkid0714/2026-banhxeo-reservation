@@ -60,6 +60,9 @@ CLI가 로그인되어 있지 않으면 본인 터미널에서 `railway login`�
 | `DATA_DIR` | `/data` (Docker 기본값, 볼륨 경로와 일치해야 함) |
 | `ADMIN_USERNAME` | 운영 관리자 ID |
 | `ADMIN_PASSWORD` | 충분히 긴 임의 비밀번호, 최소 16자; 예시 비밀번호 사용 불가 |
+| `ORDER_API_KEY` | 주문 서버 조회 연동 시 설정: 공백 없는 무작위 32자 이상의 전용 키. 주문 서버에만 동일 키 저장, 미설정 시 조회 API 비활성화 |
+| `ORDER_LOOKUP_MAX_FAILURES` | 주문 조회 실패 한도, 기본 `5` |
+| `ORDER_LOOKUP_WINDOW_SECONDS` | 주문 조회 실패 집계 기간(초), 기본 `60` |
 | `BANK_NAME` | 실제 은행 |
 | `BANK_ACCOUNT` | 실제 입금 계좌 |
 | `BANK_ACCOUNT_HOLDER` | 실제 예금주 |

@@ -82,8 +82,7 @@ npm start
 | 축제 안내 | http://127.0.0.1:3000/festival |
 | 관리자 로그인 | http://127.0.0.1:3000/admin/login |
 
-- `.env.example`을 복사한 경우: `admin` / `change-this-before-deploying`
-- `.env` 없이 실행한 로컬 기본 계정: `admin` / `banhxeo-local-2026`
+- 관리자 계정은 `.env`의 `ADMIN_USERNAME`과 `ADMIN_PASSWORD`에 직접 설정하세요.
 - 기본 DB 경로는 `data/reservations.sqlite`이며, 서버를 재시작해도 데이터가 유지됩니다.
 - 예시 예약은 자동 생성하지 않습니다. 고객 화면에서 예약한 뒤 관리자 화면에서 확인하세요.
 - 기본 문자 모드는 `mock`으로 실제 문자를 보내지 않습니다.
@@ -105,6 +104,46 @@ npm start
 | `SMS_MODE` | 문자 발송 방식 | `mock` |
 | `DATA_DIR` | SQLite 저장 디렉터리 | 로컬 `data`, 배포 `/data` |
 | `NODE_ENV` | 실행 환경 | 로컬 `development`, 운영 `production` |
+
+## 주문 서버용 수령코드 조회 API
+
+`POST /api/v1/orders/reservations/lookup`으로 확정 문자에 발급한 수령코드를 조회합니다. 예약·입금·문자 작업을 변경하거나 수령 완료를 기록하지 않습니다. 수령 완료 및 중복 수령 방지는 별도 주문 시스템에서 예약 고유 ID로 관리합니다.
+
+예약 서버와 주문 서버의 비밀 환경 변수에 동일한 `ORDER_API_KEY`를 설정하세요. 공백 없는 무작위 32자 이상의 키를 사용하고 관리자 비밀번호·문자 업체 키와 구분합니다. 미설정 시 이 API만 `503`으로 비활성화되며, 잘못된 키 설정은 서버 시작 시 거부합니다. 키는 고객 브라우저에 전달하지 않고 HTTPS를 통해 주문 서버에서만 호출합니다.
+
+```http
+POST /api/v1/orders/reservations/lookup
+Authorization: Bearer <ORDER_API_KEY>
+Content-Type: application/json
+
+{"pickupCode":"123456"}
+```
+
+성공 응답 (`200`):
+
+```json
+{
+  "reservationId": 42,
+  "quantity": 2,
+  "pickupDate": "2026-10-07",
+  "paymentConfirmed": true
+}
+```
+
+`reservationId`는 기존 예약 DB의 고유 ID이고, `paymentConfirmed`는 예약 상태가 `PAID`인지 나타냅니다. 입금 확인 전에는 수령코드가 없어 조회할 수 없습니다. 응답은 위 네 필드로 제한하며 이름·전화번호·입금자명·공개 링크 토큰·문자 내역은 포함하지 않습니다. 응답 캐시는 `no-store`입니다.
+
+| HTTP 상태 | 의미 |
+|---|---|
+| `400` | 잘못된 JSON 또는 JSON 객체가 아닌 본문 |
+| `401` | 전용 인증키 누락 또는 불일치 (관리자 쿠키로 인증 불가) |
+| `405` | POST 이외의 메서드 |
+| `413` | 본문 크기 초과 |
+| `422` | 수령코드가 6자리 숫자 문자열이 아님 |
+| `404` | 해당 수령코드의 예약이 없음 |
+| `429` | 실패 횟수 초과. `Retry-After`초 후 재시도 |
+| `503` | `ORDER_API_KEY` 미설정 |
+
+오류 본문은 `{"message":"오류 안내"}` 형식입니다. 인증된 요청의 `400`·`413`·`422`·`404` 오류를 실패로 집계합니다. 기본 한도는 첫 실패부터 60초 동안 5회이며, 이후 정상 코드도 `429`로 차단합니다. `ORDER_LOOKUP_MAX_FAILURES`와 `ORDER_LOOKUP_WINDOW_SECONDS`로 조정할 수 있습니다. 실패 횟수는 주문 연동 전체에서 공유하고 SQLite에 저장하므로 IP 변경·동시 요청·서버 재시작으로 우회할 수 없습니다. 성공해도 실패 횟수는 초기화하지 않으며 인증 실패는 이 한도를 소모하지 않습니다. 기존 단일 서버·복제본 1개 운영 기준을 따릅니다.
 
 ## 문자 연동
 
@@ -190,6 +229,6 @@ npm test
 
 ## 디자인 참고
 
-[Figma 디자인 원본](https://www.figma.com/design/hhxF5Oo0amZE1cgs1SrUfx/?node-id=0-1)을 바탕으로 고객 예약·입금 대기·확정 화면과 관리자 화면을 구성했습니다. 크림색 배경과 주황색 강조색, 모바일 390px 기준 레이아웃을 사용합니다.
+Figma 디자인을 바탕으로 고객 예약·입금 대기·확정 화면과 관리자 화면을 구성했습니다. 크림색 배경과 주황색 강조색, 모바일 390px 기준 레이아웃을 사용합니다.
 
 화면 미리보기: [예약 화면](docs/figma-reserve-preview.png) · [축제 안내](docs/figma-festival-preview.png)
