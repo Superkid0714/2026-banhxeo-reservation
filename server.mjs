@@ -20,6 +20,10 @@ if (production && smsMode === 'sendon' && (!process.env.SENDON_USER_ID || !proce
 if (production && smsMode === 'webhook' && !process.env.SMS_WEBHOOK_URL?.startsWith('https://')) throw new Error('운영 환경의 HTTPS SMS 어댑터를 설정하세요.');
 if (production && !['aligo','solapi','sendon','webhook'].includes(smsMode)) throw new Error('운영 환경의 실제 문자 발송 방식을 설정하세요.');
 const numeric = (key, fallback) => { const v = Number(process.env[key] || fallback); if (!Number.isSafeInteger(v) || v < 1) throw new Error(`Invalid ${key}`); return v; };
+const orderApiKey = process.env.ORDER_API_KEY || '';
+if (orderApiKey && (orderApiKey.length < 32 || /\s/.test(orderApiKey))) throw new Error('ORDER_API_KEY는 공백 없는 32자 이상의 전용 키로 설정하세요.');
+const orderLookupMaxFailures = numeric('ORDER_LOOKUP_MAX_FAILURES', 5);
+const orderLookupWindowSeconds = numeric('ORDER_LOOKUP_WINDOW_SECONDS', 60);
 const price = numeric('RESERVATION_UNIT_PRICE', 5500), maxQuantity = numeric('MAX_ORDER_QUANTITY', 5), timeout = numeric('PAYMENT_TIMEOUT_MINUTES', 1440);
 const dates = ['2026-10-06', '2026-10-07'], slots = ['17:30-19:00', '19:00-20:30', '20:30-22:00'];
 const preorderCloseAt = Date.parse(process.env.PREORDER_CLOSE_AT || '2026-10-06T00:00:00+09:00');
@@ -37,6 +41,7 @@ CREATE TABLE IF NOT EXISTS inventory (event_date TEXT PRIMARY KEY, reservation_l
 CREATE TABLE IF NOT EXISTS reservations (id INTEGER PRIMARY KEY, reservation_code TEXT UNIQUE NOT NULL, access_token TEXT UNIQUE NOT NULL, customer_name TEXT NOT NULL, phone TEXT NOT NULL, depositor_name TEXT NOT NULL, pickup_date TEXT NOT NULL REFERENCES inventory(event_date), pickup_slot TEXT NOT NULL, quantity INTEGER NOT NULL, unit_price INTEGER NOT NULL, expected_amount INTEGER NOT NULL, status TEXT NOT NULL, pickup_code TEXT UNIQUE, privacy_agreed INTEGER NOT NULL, refund_agreed INTEGER NOT NULL, created_at INTEGER NOT NULL, paid_at INTEGER, expired_at INTEGER);
 CREATE TABLE IF NOT EXISTS sms_jobs (id INTEGER PRIMARY KEY, reservation_id INTEGER NOT NULL REFERENCES reservations(id), phone TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL, retry_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at INTEGER NOT NULL, next_attempt INTEGER NOT NULL, sent_at INTEGER);
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS order_lookup_failures (id INTEGER PRIMARY KEY CHECK(id=1), count INTEGER NOT NULL, expires_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS sms_pending ON sms_jobs(status,next_attempt);
 CREATE INDEX IF NOT EXISTS reservations_phone ON reservations(phone);`);
 if (!db.prepare('PRAGMA table_info(sms_jobs)').all().some(column => column.name === 'provider_message_id')) db.exec('ALTER TABLE sms_jobs ADD COLUMN provider_message_id TEXT');
@@ -126,6 +131,38 @@ async function body(req) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail(400, 'JSON 객체를 입력해주세요.');
   return parsed;
 }
+// A single authenticated order integration shares a durable failure budget.
+// Do not trust proxy/IP headers or clear failures after a successful lookup.
+function checkOrderLookupLimit(res) {
+  const attempt = db.prepare('SELECT count,expires_at FROM order_lookup_failures WHERE id=1').get();
+  if (attempt && attempt.expires_at > Date.now() && attempt.count >= orderLookupMaxFailures) {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil((attempt.expires_at - Date.now()) / 1000))));
+    fail(429, '수령코드 조회 실패 횟수를 초과했습니다. 잠시 후 다시 시도해주세요.');
+  }
+}
+async function lookupOrderReservation(req, res) {
+  if (!orderApiKey) fail(503, '주문 조회 API가 설정되지 않았습니다.');
+  if (!equal(req.headers.authorization || '', `Bearer ${orderApiKey}`)) fail(401, '주문 서버 인증키가 필요합니다.');
+  checkOrderLookupLimit(res);
+  try {
+    const b = await body(req);
+    // Body reads can overlap; check again before the synchronous lookup.
+    checkOrderLookupLimit(res);
+    if (typeof b.pickupCode !== 'string' || !/^[0-9]{6}$/.test(b.pickupCode)) fail(422, '수령코드는 6자리 숫자 문자열로 입력해주세요.');
+    const r = db.prepare('SELECT id,quantity,pickup_date,status FROM reservations WHERE pickup_code=?').get(b.pickupCode);
+    if (!r) fail(404, '예약을 찾을 수 없습니다.');
+    return { reservationId: r.id, quantity: r.quantity, pickupDate: r.pickup_date, paymentConfirmed: r.status === 'PAID' };
+  } catch (error) {
+    if ([400, 413, 422, 404].includes(error.status)) {
+      const now = Date.now();
+      db.prepare(`INSERT INTO order_lookup_failures(id,count,expires_at) VALUES (1,1,?)
+        ON CONFLICT(id) DO UPDATE SET
+        count=CASE WHEN expires_at>? THEN count+1 ELSE 1 END,
+        expires_at=CASE WHEN expires_at>? THEN expires_at ELSE excluded.expires_at END`).run(now + orderLookupWindowSeconds * 1000, now, now);
+    }
+    throw error;
+  }
+}
 const server = http.createServer(async (req,res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
@@ -135,6 +172,10 @@ const server = http.createServer(async (req,res) => {
     if (route.startsWith('/api/')) {
       if (!['GET','POST'].includes(req.method)) fail(405,'허용되지 않는 요청입니다.');
       if (req.method === 'POST' && req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) fail(403,'허용되지 않는 출처입니다.');
+      if (route === '/api/v1/orders/reservations/lookup') {
+        if (req.method !== 'POST') fail(405, '허용되지 않는 요청입니다.');
+        return json(await lookupOrderReservation(req, res));
+      }
       expire();
       if (route === '/api/v1/config' && req.method === 'GET') return json({ unitPrice: price, maxQuantity, dates, slots, preorderClosed: Date.now() >= preorderCloseAt, bank, contactPhone, timeoutMinutes: timeout, smsMode, smsTestMode: smsMode === 'aligo' && !production && process.env.ALIGO_TEST_MODE === 'Y' });
       if (route === '/api/v1/admin/login' && req.method === 'POST') {
