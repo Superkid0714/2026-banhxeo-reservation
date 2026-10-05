@@ -24,7 +24,10 @@ const price = numeric('RESERVATION_UNIT_PRICE', 5500), maxQuantity = numeric('MA
 const dates = ['2026-10-06', '2026-10-07'], slots = ['17:30-19:00', '19:00-20:30', '20:30-22:00'];
 const preorderCloseAt = Date.parse(process.env.PREORDER_CLOSE_AT || '2026-10-06T00:00:00+09:00');
 if (!Number.isFinite(preorderCloseAt)) throw new Error('Invalid PREORDER_CLOSE_AT');
-const bank = { bankName: process.env.BANK_NAME || '토스뱅크', accountNumber: process.env.BANK_ACCOUNT || '1002-7788-0098', accountHolder: process.env.BANK_ACCOUNT_HOLDER || '이요셉' };
+const bank = { bankName: process.env.BANK_NAME?.trim() || '테스트 은행', accountNumber: process.env.BANK_ACCOUNT?.trim() || '설정 필요', accountHolder: process.env.BANK_ACCOUNT_HOLDER?.trim() || '테스트 예금주' };
+const contactPhone = process.env.CONTACT_PHONE?.trim() || '';
+if (contactPhone && !/^0\d{8,10}$/.test(contactPhone)) throw new Error('CONTACT_PHONE은 숫자만 입력하세요.');
+if (production && ['BANK_NAME', 'BANK_ACCOUNT', 'BANK_ACCOUNT_HOLDER', 'CONTACT_PHONE'].some(key => !process.env[key]?.trim())) throw new Error('운영 환경의 입금 계좌와 문의 전화번호를 설정하세요.');
 const dataDir = process.env.DATA_DIR || path.join(root, 'data');
 mkdirSync(dataDir, { recursive: true });
 const db = new DatabaseSync(path.join(dataDir, 'reservations.sqlite'));
@@ -133,7 +136,7 @@ const server = http.createServer(async (req,res) => {
       if (!['GET','POST'].includes(req.method)) fail(405,'허용되지 않는 요청입니다.');
       if (req.method === 'POST' && req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) fail(403,'허용되지 않는 출처입니다.');
       expire();
-      if (route === '/api/v1/config' && req.method === 'GET') return json({ unitPrice: price, maxQuantity, dates, slots, preorderClosed: Date.now() >= preorderCloseAt, bank, timeoutMinutes: timeout, smsMode, smsTestMode: smsMode === 'aligo' && !production && process.env.ALIGO_TEST_MODE === 'Y' });
+      if (route === '/api/v1/config' && req.method === 'GET') return json({ unitPrice: price, maxQuantity, dates, slots, preorderClosed: Date.now() >= preorderCloseAt, bank, contactPhone, timeoutMinutes: timeout, smsMode, smsTestMode: smsMode === 'aligo' && !production && process.env.ALIGO_TEST_MODE === 'Y' });
       if (route === '/api/v1/admin/login' && req.method === 'POST') {
         const key = req.socket.remoteAddress, attempt = loginAttempts.get(key);
         if (attempt && attempt.until > Date.now() && attempt.count >= 5) fail(429,'잠시 후 다시 로그인해주세요.');

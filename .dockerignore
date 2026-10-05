@@ -8,3 +8,16 @@ node_modules
 tests
 docs
 *.log
+.aws
+backups
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.bak
+*.pem
+*.key
+*.p12
+*.pfx

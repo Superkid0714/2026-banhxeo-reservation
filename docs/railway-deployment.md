@@ -26,7 +26,7 @@ Railway Hobby는 월 사용량이 $3이면 $5, $7이면 $7을 청구한다. 서�
 
 ### API 키 허용 IP 확인
 
-SOLAPI 키 생성 화면에서 허용 IP 제한을 요청하면 Railway 서비스의 고정 Outbound IP를 사용한다. 이 설정은 Railway Pro에서 제공한다. 서비스 Settings → Networking → Enable Static IPs에서 표시되는 주소를 확인하고, SOLAPI 키에는 가능하면 각 주소를 `/32`로 등록한다. 현재 `reservation` 서비스의 싱가포르 지역 주소는 `208.77.246.240`, `208.77.246.241`, `208.77.246.242`다. 한 범위만 등록할 수 있다면 `208.77.246.240/30`이 세 주소를 포함하지만 `.243`도 함께 허용한다. 지역을 변경하거나 고정 IP를 다시 할당하면 SOLAPI 키의 허용 IP도 갱신한다. 고정 IP 활성화 후 실제 외부 요청에 적용하려면 배포가 필요하다. [Railway 고정 Outbound IP](https://docs.railway.com/networking/static-outbound-ips)
+SOLAPI 키 생성 화면에서 허용 IP 제한을 요청하면 Railway 서비스의 고정 Outbound IP를 사용한다. 이 설정은 Railway Pro에서 제공한다. 서비스 Settings → Networking → Enable Static IPs에서 표시되는 주소를 확인하고, SOLAPI 키에는 가능하면 각 주소를 `/32`로 등록한다. 실제 IP 주소는 저장소에 기록하지 않고 Railway 설정 화면에서 확인해 문자 업체 콘솔에 등록한다. 지역을 변경하거나 고정 IP를 다시 할당하면 SOLAPI 키의 허용 IP도 갱신한다. 고정 IP 활성화 후 실제 외부 요청에 적용하려면 배포가 필요하다. [Railway 고정 Outbound IP](https://docs.railway.com/networking/static-outbound-ips)
 
 ### 센드온을 사용할 경우 추가 확인
 
@@ -39,7 +39,7 @@ Railway 고정 Outbound IP는 Pro에서 제공한다. 위 Hobby 비용표는 고
 CLI가 로그인되어 있지 않으면 본인 터미널에서 `railway login`을 실행해 계정을 연결한다. 인증 토큰이나 문자 API 키는 채팅이나 Git에 기록하지 않는다. 서비스 생성·볼륨 연결·고정 IP 설정은 로그인 후 진행한다. 문자 연동이 완료되기 전에는 고객 예약 접수를 시작하지 않는다.
 
 1. Railway에 로그인하고 사용할 요금제와 결제 조건을 확인한다.
-2. GitHub 저장소 `Superkid0714/2026-banhxeo-reservation`의 `main`을 연결한다. 아래 파일들이 GitHub에 반영된 뒤 배포한다.
+2. 사용할 GitHub 저장소의 `main`을 연결한다. 아래 파일들이 GitHub에 반영된 뒤 배포한다.
 3. 루트 `Dockerfile`을 사용한다. 별도 Build Command와 Start Command를 입력하지 않는다. Dockerfile의 `CMD`가 서버를 실행한다.
 4. 서비스에 영구 볼륨을 추가하고 Mount Path를 **`/data`**로 지정한다. 이 볼륨 없이는 운영 예약을 받지 않는다.
 5. 복제본은 **1개**, Serverless/App Sleeping은 **비활성화**한다. 문자 발송·만료 처리가 서버 내 타이머에서 실행되므로 서버를 계속 실행해야 한다.
@@ -63,6 +63,7 @@ CLI가 로그인되어 있지 않으면 본인 터미널에서 `railway login`�
 | `BANK_NAME` | 실제 은행 |
 | `BANK_ACCOUNT` | 실제 입금 계좌 |
 | `BANK_ACCOUNT_HOLDER` | 실제 예금주 |
+| `CONTACT_PHONE` | 고객 문의 전화번호, 숫자만 입력 (필수) |
 | `RESERVATION_UNIT_PRICE` | 상품 가격, 현재 예시 `5500` |
 | `MAX_ORDER_QUANTITY` | 주문당 최대 수량, 현재 예시 `5` |
 | `PAYMENT_TIMEOUT_MINUTES` | 입금 확인 대기시간(분), 기본 `1440`(24시간) |
