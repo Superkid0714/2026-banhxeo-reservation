@@ -232,7 +232,7 @@ const server = http.createServer(async (req,res) => {
       fail(404,'요청을 찾을 수 없습니다.');
     }
     if(req.method!=='GET') fail(405,'허용되지 않는 요청입니다.');
-    const assets = { '/app.js':['app.js','text/javascript'], '/style.css':['style.css','text/css'], '/food.png':['food.png','image/png'] };
+    const assets = { '/app.js':['app.js','text/javascript'], '/style.css':['style.css','text/css'], '/food.png':['food.png','image/png'], '/product-poster.png':['product-poster.png','image/png'], '/search.svg':['search.svg','image/svg+xml'] };
     const asset=assets[route] || ['index.html','text/html'];
     res.writeHead(200,{'Content-Type':`${asset[1]}; charset=utf-8`,'Cache-Control':'no-cache'}); res.end(readFileSync(path.join(root,'public',asset[0])));
   } catch(error) { json({message:error.status ? error.message : '서버 오류가 발생했습니다.',fields:error.fields},error.status||500); if(!error.status) console.error(error); }
